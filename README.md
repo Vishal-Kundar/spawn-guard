@@ -80,7 +80,7 @@ Model names are normalized: `claude-opus-4-6`, `claude-opus-4-6[1m]`, `Opus`, an
 | `/spawn-guard enable` | Re-enable |
 | `/spawn-guard uninstall` | Remove everything |
 
-Per-chat overrides expire after 24 hours automatically.
+Temporary overrides apply to all concurrent Claude Code sessions and expire after 24 hours automatically.
 
 ## How It Works
 
@@ -92,19 +92,26 @@ The setup wizard (`/spawn-guard`) does three things:
 
 The hook reads config fresh on every call, so changes via `/spawn-guard set` take effect immediately.
 
+**Note:** Hook registration changes (install/uninstall) require restarting Claude Code to take effect.
+
 ## Platform Support
 
 | Platform | Hook | Requirements |
 |----------|------|-------------|
 | Windows | PowerShell (.ps1) | PowerShell 5.1+ (included) |
-| macOS | Bash (.sh) | jq (`brew install jq`) |
-| Linux | Bash (.sh) | jq (`sudo apt install jq`) |
+| macOS | Bash (.sh) | bash 4+ (`brew install bash`), jq (`brew install jq`) |
+| Linux | Bash (.sh) | bash 4+, jq (`sudo apt install jq`) |
 
 ## Limitations
 
 - The `Agent` tool has no `effort` parameter. Effort enforcement only works on `Workflow` `agent()` calls. For `Agent` spawns, effort is inherited from the session's global setting.
+- Spawns that omit the `model` parameter bypass the hook entirely. The soft CLAUDE.md layer handles these cases proactively.
+- Fork spawns (`subagent_type: "fork"`) are exempt from model checks since forks inherit the parent model by contract.
 - Output style is enforced by appending instructions to the subagent prompt. It depends on the subagent following them.
 - Workflow script checking uses regex, not a JS parser. It catches `model: 'xxx'` and `effort: 'xxx'` but may false-positive on values in comments and can miss dynamically computed values.
+- Temporary overrides apply to all concurrent Claude Code sessions (shared file), not just the current session.
+- Custom model IDs as defaults (e.g., `claude-sonnet-5`) are compared literally after normalization. If the custom ID doesn't contain a known family name, auto-correct may instruct a re-spawn with a value the Agent tool schema doesn't accept.
+- Hook registration changes require restarting Claude Code to take effect. Config changes (`/spawn-guard set`) take effect immediately.
 
 ## Uninstalling
 

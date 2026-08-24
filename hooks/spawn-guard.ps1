@@ -1,7 +1,5 @@
 # spawn-guard PreToolUse hook (Windows)
 # Enforces model/effort defaults on Agent and Workflow tool calls
-# Config: ~/.claude/spawn-guard.json
-# Session overrides: ~/.claude/spawn-guard-session.json
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -15,7 +13,10 @@ try {
 $toolName = $hookData.tool_name
 if ($toolName -ne 'Agent' -and $toolName -ne 'Workflow') { exit 0 }
 
-$configPath = Join-Path $env:USERPROFILE '.claude\spawn-guard.json'
+if ($toolName -eq 'Agent' -and $hookData.tool_input.subagent_type -eq 'fork') { exit 0 }
+
+$homePath = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+$configPath = Join-Path $homePath '.claude\spawn-guard.json'
 if (-not (Test-Path $configPath)) { exit 0 }
 
 try {
@@ -40,73 +41,67 @@ function Normalize-Model {
 
 $effectiveModel = Normalize-Model $defaults.model
 $effectiveEffort = if ($defaults.effort) { $defaults.effort.ToLower().Trim() } else { $null }
-$enforcement = if ($config.enforcement) { $config.enforcement } else { 'auto-correct' }
+$enforcement = if ($config.enforcement) { $config.enforcement.ToLower().Trim() } else { 'auto-correct' }
 
-# Check session override (expires after 24h)
-$overridePath = Join-Path $env:USERPROFILE '.claude\spawn-guard-session.json'
+$overridePath = Join-Path $homePath '.claude\spawn-guard-session.json'
 if (Test-Path $overridePath) {
     try {
         $override = Get-Content $overridePath -Raw | ConvertFrom-Json
-        $ts = [datetime]::Parse($override.timestamp)
-        if (([datetime]::UtcNow - $ts).TotalHours -lt 24) {
+        $ts = [DateTimeOffset]::Parse($override.timestamp).UtcDateTime
+        $age = ([datetime]::UtcNow - $ts).TotalHours
+        if ($age -ge 0 -and $age -lt 24) {
             if ($override.model) { $effectiveModel = Normalize-Model $override.model }
             if ($override.effort) { $effectiveEffort = $override.effort.ToLower().Trim() }
         }
     } catch {}
 }
 
-function Write-Decision {
-    param([string]$Decision, [string]$Reason)
-    $escapedReason = $Reason -replace '"', '\"' -replace '\\', '\\\\'
-    Write-Output "{`"decision`":`"$Decision`",`"reason`":`"$escapedReason`"}"
-}
-
 function Decide {
-    param([string]$Reason)
+    param([string]$Message, [string]$Correction)
     if ($enforcement -eq 'warn') {
-        Write-Decision -Decision 'approve' -Reason $Reason
-    } else {
-        Write-Decision -Decision 'block' -Reason $Reason
+        [Console]::Error.WriteLine("spawn-guard warning: $Message")
+        exit 0
     }
+    $reason = if ($enforcement -eq 'block') {
+        "Spawn Guard: $Message Do not retry automatically. Ask the user how to proceed."
+    } else {
+        "Spawn Guard: $Message $Correction"
+    }
+    @{ decision = 'block'; reason = $reason } | ConvertTo-Json -Compress
 }
 
-# --- Agent tool checks ---
 if ($toolName -eq 'Agent') {
-    $toolInput = $hookData.tool_input
-    $requestedModel = Normalize-Model $toolInput.model
+    $requestedModel = Normalize-Model $hookData.tool_input.model
 
-    if ($requestedModel -and $effectiveModel -and $requestedModel -ne $effectiveModel) {
-        Decide "Spawn Guard: model mismatch. Requested '$requestedModel', configured default is '$effectiveModel'. Re-spawn with model='$effectiveModel'."
+    if ($requestedModel -and $effectiveModel -and ($requestedModel -cne $effectiveModel)) {
+        Decide "model mismatch. Requested '$requestedModel', configured default is '$effectiveModel'." "Re-spawn with model='$effectiveModel'."
         exit 0
     }
 }
 
-# --- Workflow tool checks ---
 if ($toolName -eq 'Workflow') {
     $script = $hookData.tool_input.script
     if (-not $script) { exit 0 }
 
-    # Check model in agent() opts
     if ($effectiveModel) {
-        $modelPattern = "model:\s*['""](\w+)['""]"
+        $modelPattern = "model:\s*['""]([A-Za-z0-9._\[\]-]+)['""]"
         $modelMatches = [regex]::Matches($script, $modelPattern)
         foreach ($m in $modelMatches) {
             $found = Normalize-Model $m.Groups[1].Value
-            if ($found -ne $effectiveModel) {
-                Decide "Spawn Guard: workflow script uses model '$found', configured default is '$effectiveModel'. Update to model: '$effectiveModel'."
+            if ($found -cne $effectiveModel) {
+                Decide "workflow script uses model '$found', configured default is '$effectiveModel'." "Update to model: '$effectiveModel'."
                 exit 0
             }
         }
     }
 
-    # Check effort in agent() opts
     if ($effectiveEffort) {
-        $effortPattern = "effort:\s*['""](\w+)['""]"
+        $effortPattern = "effort:\s*['""]([A-Za-z0-9._-]+)['""]"
         $effortMatches = [regex]::Matches($script, $effortPattern)
         foreach ($m in $effortMatches) {
-            $found = $m.Groups[1].Value
+            $found = $m.Groups[1].Value.ToLower().Trim()
             if ($found -ne $effectiveEffort) {
-                Decide "Spawn Guard: workflow script uses effort '$found', configured default is '$effectiveEffort'. Update to effort: '$effectiveEffort'."
+                Decide "workflow script uses effort '$found', configured default is '$effectiveEffort'." "Update to effort: '$effectiveEffort'."
                 exit 0
             }
         }

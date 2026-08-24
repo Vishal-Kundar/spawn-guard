@@ -44,7 +44,7 @@ Use `AskUserQuestion` with these questions (all in one call):
 **Question 2 - Default effort:**
 - Header: "Effort"
 - Question: "What reasoning effort should subagents use by default?"
-- Options: low, medium, high, max
+- Options: low, medium, high, xhigh, max
 - multiSelect: false
 
 **Question 3 - Output style:**
@@ -100,7 +100,7 @@ Determine the platform and install the appropriate hook:
   "hooks": [
     {
       "type": "command",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"<HOME>\\.claude\\hooks\\spawn-guard.ps1\"",
+      "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"<HOME>\\.claude\\hooks\\spawn-guard.ps1\"",
       "timeout": 5
     }
   ]
@@ -149,11 +149,12 @@ When the user says "use [model] for this chat", "set effort to [level]", or simi
 
 ### Step 5: Confirm
 
-Tell the user setup is complete. Show:
+Tell the user setup is complete and that they should **restart Claude Code** (or start a new session) for the hook to take effect. Show:
 - The configured defaults
 - Hook installation status
+- That a restart is needed to activate the hook
 - How to change settings (`/spawn-guard set model sonnet`)
-- How to set per-chat overrides (`/spawn-guard override model sonnet` or just say "use sonnet for this chat")
+- How to set temporary overrides (`/spawn-guard override model sonnet` or just say "use sonnet for this chat")
 
 ---
 
@@ -228,7 +229,10 @@ try {
 $toolName = $hookData.tool_name
 if ($toolName -ne 'Agent' -and $toolName -ne 'Workflow') { exit 0 }
 
-$configPath = Join-Path $env:USERPROFILE '.claude\spawn-guard.json'
+if ($toolName -eq 'Agent' -and $hookData.tool_input.subagent_type -eq 'fork') { exit 0 }
+
+$homePath = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+$configPath = Join-Path $homePath '.claude\spawn-guard.json'
 if (-not (Test-Path $configPath)) { exit 0 }
 
 try {
@@ -253,41 +257,40 @@ function Normalize-Model {
 
 $effectiveModel = Normalize-Model $defaults.model
 $effectiveEffort = if ($defaults.effort) { $defaults.effort.ToLower().Trim() } else { $null }
-$enforcement = if ($config.enforcement) { $config.enforcement } else { 'auto-correct' }
+$enforcement = if ($config.enforcement) { $config.enforcement.ToLower().Trim() } else { 'auto-correct' }
 
-$overridePath = Join-Path $env:USERPROFILE '.claude\spawn-guard-session.json'
+$overridePath = Join-Path $homePath '.claude\spawn-guard-session.json'
 if (Test-Path $overridePath) {
     try {
         $override = Get-Content $overridePath -Raw | ConvertFrom-Json
-        $ts = [datetime]::Parse($override.timestamp)
-        if (([datetime]::UtcNow - $ts).TotalHours -lt 24) {
+        $ts = [DateTimeOffset]::Parse($override.timestamp).UtcDateTime
+        $age = ([datetime]::UtcNow - $ts).TotalHours
+        if ($age -ge 0 -and $age -lt 24) {
             if ($override.model) { $effectiveModel = Normalize-Model $override.model }
             if ($override.effort) { $effectiveEffort = $override.effort.ToLower().Trim() }
         }
     } catch {}
 }
 
-function Write-Decision {
-    param([string]$Decision, [string]$Reason)
-    $escapedReason = $Reason -replace '"', '\"' -replace '\\', '\\\\'
-    Write-Output "{`"decision`":`"$Decision`",`"reason`":`"$escapedReason`"}"
-}
-
 function Decide {
-    param([string]$Reason)
+    param([string]$Message, [string]$Correction)
     if ($enforcement -eq 'warn') {
-        Write-Decision -Decision 'approve' -Reason $Reason
-    } else {
-        Write-Decision -Decision 'block' -Reason $Reason
+        [Console]::Error.WriteLine("spawn-guard warning: $Message")
+        exit 0
     }
+    $reason = if ($enforcement -eq 'block') {
+        "Spawn Guard: $Message Do not retry automatically. Ask the user how to proceed."
+    } else {
+        "Spawn Guard: $Message $Correction"
+    }
+    @{ decision = 'block'; reason = $reason } | ConvertTo-Json -Compress
 }
 
 if ($toolName -eq 'Agent') {
-    $toolInput = $hookData.tool_input
-    $requestedModel = Normalize-Model $toolInput.model
+    $requestedModel = Normalize-Model $hookData.tool_input.model
 
-    if ($requestedModel -and $effectiveModel -and $requestedModel -ne $effectiveModel) {
-        Decide "Spawn Guard: model mismatch. Requested '$requestedModel', configured default is '$effectiveModel'. Re-spawn with model='$effectiveModel'."
+    if ($requestedModel -and $effectiveModel -and ($requestedModel -cne $effectiveModel)) {
+        Decide "model mismatch. Requested '$requestedModel', configured default is '$effectiveModel'." "Re-spawn with model='$effectiveModel'."
         exit 0
     }
 }
@@ -297,24 +300,24 @@ if ($toolName -eq 'Workflow') {
     if (-not $script) { exit 0 }
 
     if ($effectiveModel) {
-        $modelPattern = "model:\s*['""](\w+)['""]"
+        $modelPattern = "model:\s*['""]([A-Za-z0-9._\[\]-]+)['""]"
         $modelMatches = [regex]::Matches($script, $modelPattern)
         foreach ($m in $modelMatches) {
             $found = Normalize-Model $m.Groups[1].Value
-            if ($found -ne $effectiveModel) {
-                Decide "Spawn Guard: workflow script uses model '$found', configured default is '$effectiveModel'. Update to model: '$effectiveModel'."
+            if ($found -cne $effectiveModel) {
+                Decide "workflow script uses model '$found', configured default is '$effectiveModel'." "Update to model: '$effectiveModel'."
                 exit 0
             }
         }
     }
 
     if ($effectiveEffort) {
-        $effortPattern = "effort:\s*['""](\w+)['""]"
+        $effortPattern = "effort:\s*['""]([A-Za-z0-9._-]+)['""]"
         $effortMatches = [regex]::Matches($script, $effortPattern)
         foreach ($m in $effortMatches) {
-            $found = $m.Groups[1].Value
+            $found = $m.Groups[1].Value.ToLower().Trim()
             if ($found -ne $effectiveEffort) {
-                Decide "Spawn Guard: workflow script uses effort '$found', configured default is '$effectiveEffort'. Update to effort: '$effectiveEffort'."
+                Decide "workflow script uses effort '$found', configured default is '$effectiveEffort'." "Update to effort: '$effectiveEffort'."
                 exit 0
             }
         }
@@ -330,23 +333,31 @@ exit 0
 #!/usr/bin/env bash
 # spawn-guard PreToolUse hook (macOS/Linux)
 # Enforces model/effort defaults on Agent and Workflow tool calls
-# Requires: jq
+# Requires: bash 4+, jq
 
 set -euo pipefail
 
+command -v jq >/dev/null 2>&1 || exit 0
+
 INPUT=$(cat)
 
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 [[ "$TOOL_NAME" != "Agent" && "$TOOL_NAME" != "Workflow" ]] && exit 0
+
+if [[ "$TOOL_NAME" == "Agent" ]]; then
+    SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty')
+    [[ "$SUBAGENT_TYPE" == "fork" ]] && exit 0
+fi
 
 CONFIG_PATH="$HOME/.claude/spawn-guard.json"
 [[ ! -f "$CONFIG_PATH" ]] && exit 0
 
-ENABLED=$(jq -r '.enabled // true' "$CONFIG_PATH")
+ENABLED=$(jq -r 'if .enabled == false then "false" else "true" end' "$CONFIG_PATH")
 [[ "$ENABLED" == "false" ]] && exit 0
 
 normalize_model() {
-    local m="${1,,}"
+    local m
+    m=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
     case "$m" in
         *opus*)   echo "opus" ;;
         *sonnet*) echo "sonnet" ;;
@@ -358,7 +369,7 @@ normalize_model() {
 
 DEFAULTS_MODEL=$(jq -r '.defaults.model // empty' "$CONFIG_PATH")
 DEFAULTS_EFFORT=$(jq -r '.defaults.effort // empty' "$CONFIG_PATH" | tr '[:upper:]' '[:lower:]')
-ENFORCEMENT=$(jq -r '.enforcement // "auto-correct"' "$CONFIG_PATH")
+ENFORCEMENT=$(jq -r '.enforcement // "auto-correct"' "$CONFIG_PATH" | tr '[:upper:]' '[:lower:]')
 
 EFFECTIVE_MODEL=$(normalize_model "$DEFAULTS_MODEL")
 EFFECTIVE_EFFORT="$DEFAULTS_EFFORT"
@@ -367,59 +378,72 @@ OVERRIDE_PATH="$HOME/.claude/spawn-guard-session.json"
 if [[ -f "$OVERRIDE_PATH" ]]; then
     OVERRIDE_TS=$(jq -r '.timestamp // empty' "$OVERRIDE_PATH")
     if [[ -n "$OVERRIDE_TS" ]]; then
+        OVERRIDE_EPOCH=0
         if OVERRIDE_EPOCH=$(date -d "$OVERRIDE_TS" +%s 2>/dev/null); then
             :
-        elif OVERRIDE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${OVERRIDE_TS%%.*}" +%s 2>/dev/null); then
-            :
         else
-            OVERRIDE_EPOCH=0
+            CLEAN_TS=$(printf '%s' "$OVERRIDE_TS" | sed 's/\.[0-9]*Z$//' | sed 's/Z$//')
+            if OVERRIDE_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$CLEAN_TS" +%s 2>/dev/null); then
+                :
+            else
+                OVERRIDE_EPOCH=0
+            fi
         fi
         NOW_EPOCH=$(date +%s)
         DIFF=$(( NOW_EPOCH - OVERRIDE_EPOCH ))
-        if (( DIFF < 86400 )); then
+        if (( DIFF >= 0 && DIFF < 86400 )); then
             OV_MODEL=$(jq -r '.model // empty' "$OVERRIDE_PATH")
             OV_EFFORT=$(jq -r '.effort // empty' "$OVERRIDE_PATH")
             [[ -n "$OV_MODEL" ]] && EFFECTIVE_MODEL=$(normalize_model "$OV_MODEL")
-            [[ -n "$OV_EFFORT" ]] && EFFECTIVE_EFFORT="${OV_EFFORT,,}"
+            [[ -n "$OV_EFFORT" ]] && EFFECTIVE_EFFORT=$(printf '%s' "$OV_EFFORT" | tr '[:upper:]' '[:lower:]')
         fi
     fi
 fi
 
 decide() {
-    local reason="$1"
-    reason=$(echo "$reason" | sed 's/"/\\"/g')
+    local message="$1"
+    local correction="${2:-}"
     if [[ "$ENFORCEMENT" == "warn" ]]; then
-        printf '{"decision":"approve","reason":"%s"}\n' "$reason"
+        >&2 printf 'spawn-guard warning: %s\n' "$message"
+        exit 0
+    elif [[ "$ENFORCEMENT" == "block" ]]; then
+        jq -n --arg r "Spawn Guard: $message Do not retry automatically. Ask the user how to proceed." \
+            '{decision: "block", reason: $r}'
     else
-        printf '{"decision":"block","reason":"%s"}\n' "$reason"
+        jq -n --arg r "Spawn Guard: $message $correction" \
+            '{decision: "block", reason: $r}'
     fi
 }
 
 if [[ "$TOOL_NAME" == "Agent" ]]; then
-    REQUESTED_MODEL=$(normalize_model "$(echo "$INPUT" | jq -r '.tool_input.model // empty')")
+    RAW_REQUESTED=$(printf '%s' "$INPUT" | jq -r '.tool_input.model // empty')
+    REQUESTED_MODEL=$(normalize_model "$RAW_REQUESTED")
     if [[ -n "$REQUESTED_MODEL" && -n "$EFFECTIVE_MODEL" && "$REQUESTED_MODEL" != "$EFFECTIVE_MODEL" ]]; then
-        decide "Spawn Guard: model mismatch. Requested '$REQUESTED_MODEL', configured default is '$EFFECTIVE_MODEL'. Re-spawn with model='$EFFECTIVE_MODEL'."
+        decide "model mismatch. Requested '$REQUESTED_MODEL', configured default is '$EFFECTIVE_MODEL'." "Re-spawn with model='$EFFECTIVE_MODEL'."
         exit 0
     fi
 fi
 
 if [[ "$TOOL_NAME" == "Workflow" ]]; then
-    SCRIPT=$(echo "$INPUT" | jq -r '.tool_input.script // empty')
+    SCRIPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.script // empty')
+
     if [[ -n "$SCRIPT" && -n "$EFFECTIVE_MODEL" ]]; then
-        FOUND_MODELS=$(echo "$SCRIPT" | grep -oP "model:\s*['\"](\K\w+)" || true)
+        FOUND_MODELS=$(printf '%s' "$SCRIPT" | grep -oE "model:[[:space:]]*['\"][^'\"]+['\"]" | sed "s/model:[[:space:]]*['\"]//;s/['\"]$//" || true)
         for RAW_MODEL in $FOUND_MODELS; do
             MODEL=$(normalize_model "$RAW_MODEL")
             if [[ "$MODEL" != "$EFFECTIVE_MODEL" ]]; then
-                decide "Spawn Guard: workflow uses model '$MODEL', configured default is '$EFFECTIVE_MODEL'. Update to model: '$EFFECTIVE_MODEL'."
+                decide "workflow uses model '$MODEL', configured default is '$EFFECTIVE_MODEL'." "Update to model: '$EFFECTIVE_MODEL'."
                 exit 0
             fi
         done
     fi
+
     if [[ -n "$SCRIPT" && -n "$EFFECTIVE_EFFORT" ]]; then
-        FOUND_EFFORTS=$(echo "$SCRIPT" | grep -oP "effort:\s*['\"](\K\w+)" || true)
-        for EFFORT in $FOUND_EFFORTS; do
+        FOUND_EFFORTS=$(printf '%s' "$SCRIPT" | grep -oE "effort:[[:space:]]*['\"][^'\"]+['\"]" | sed "s/effort:[[:space:]]*['\"]//;s/['\"]$//" || true)
+        for RAW_EFFORT in $FOUND_EFFORTS; do
+            EFFORT=$(printf '%s' "$RAW_EFFORT" | tr '[:upper:]' '[:lower:]')
             if [[ "$EFFORT" != "$EFFECTIVE_EFFORT" ]]; then
-                decide "Spawn Guard: workflow uses effort '$EFFORT', configured default is '$EFFECTIVE_EFFORT'. Update to effort: '$EFFECTIVE_EFFORT'."
+                decide "workflow uses effort '$EFFORT', configured default is '$EFFECTIVE_EFFORT'." "Update to effort: '$EFFECTIVE_EFFORT'."
                 exit 0
             fi
         done
@@ -441,10 +465,14 @@ exit 0
 
 **What each enforcement mode does:**
 - **auto-correct**: Hook blocks the wrong spawn. Claude sees the block reason and re-spawns with correct settings. From the user's perspective, it looks like a brief retry.
-- **warn**: Hook approves but shows a warning. The spawn proceeds with wrong settings but the mismatch is visible.
-- **block**: Hook blocks and does NOT auto-retry. Claude must ask the user what to do.
+- **warn**: Hook exits silently (no decision output). The spawn proceeds through normal permission flow. The CLAUDE.md soft layer handles enforcement proactively.
+- **block**: Hook blocks with a reason that instructs Claude not to retry automatically and to ask the user how to proceed.
 
 **Limitations (tell the user during setup):**
 - The Agent tool has no `effort` parameter. Effort is only enforceable on Workflow `agent()` calls. For Agent spawns, effort is inherited from the session's global effort level.
 - Output style is enforced via prompt text, not a parameter. It's soft enforcement.
 - The Workflow script check is regex-based (not a full JS parser). It catches `model: 'xxx'` and `effort: 'xxx'` patterns but could miss computed values.
+- Spawns that omit the `model` parameter bypass the hook check. The CLAUDE.md soft layer handles these.
+- Fork spawns (`subagent_type: "fork"`) are exempt from model checks since forks always inherit the parent model.
+- Temporary overrides (`spawn-guard-session.json`) apply to all concurrent Claude Code sessions, not just the current one.
+- Hook registration changes (install/uninstall) require restarting Claude Code to take effect.

@@ -41,9 +41,10 @@ You need a `~/.claude/spawn-guard.json` config file in place for the hook to enf
 
 ## Code Style
 
-- PowerShell: follow the patterns in `hooks/spawn-guard.ps1`
-- Bash: `set -euo pipefail`, require `jq`, handle both GNU and BSD date
+- PowerShell: follow the patterns in `hooks/spawn-guard.ps1`. Use `ConvertTo-Json` for output, never hand-rolled escaping.
+- Bash: `set -euo pipefail`, require `jq`, use `jq -n --arg` for JSON output, handle both GNU and BSD date. Use `tr '[:upper:]' '[:lower:]'` for lowercasing (not `${var,,}` which requires bash 4+). Use `grep -oE` (not `grep -P` which is unavailable on macOS).
 - No dependencies beyond what ships with the OS (plus jq on Unix)
+- The `hooks/` directory is the canonical source for hook scripts. The inline scripts in SKILL.md are fallbacks and must match.
 
 ## License
 
