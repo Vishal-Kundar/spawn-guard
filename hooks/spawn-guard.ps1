@@ -47,7 +47,12 @@ $overridePath = Join-Path $homePath '.claude\spawn-guard-session.json'
 if (Test-Path $overridePath) {
     try {
         $override = Get-Content $overridePath -Raw | ConvertFrom-Json
-        $ts = [DateTimeOffset]::Parse($override.timestamp).UtcDateTime
+        $tsRaw = $override.timestamp
+        if ($tsRaw -is [datetime]) {
+            $ts = $tsRaw.ToUniversalTime()
+        } else {
+            $ts = [DateTimeOffset]::Parse([string]$tsRaw).UtcDateTime
+        }
         $age = ([datetime]::UtcNow - $ts).TotalHours
         if ($age -ge 0 -and $age -lt 24) {
             if ($override.model) { $effectiveModel = Normalize-Model $override.model }
