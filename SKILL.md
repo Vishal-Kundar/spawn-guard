@@ -1,0 +1,449 @@
+---
+name: spawn-guard
+description: Enforce model, effort, and output defaults on every subagent spawn with per-chat overrides and auto-correction
+whenToUse: When the user wants to configure, check, or change subagent spawn defaults (model, effort, output style), or when they say "use X model for this chat"
+---
+
+# Spawn Guard
+
+Enforce consistent model, effort, and output style across every subagent spawn (Agent tool and Workflow `agent()` calls). Catches misconfigured spawns via a PreToolUse hook and auto-corrects them.
+
+## Invocation Routing
+
+Parse the user's invocation to determine intent:
+
+| Invocation | Action |
+|---|---|
+| `/spawn-guard` (no args) | Show status or run first-time setup |
+| `/spawn-guard setup` | Run first-time setup (even if already configured) |
+| `/spawn-guard status` | Show current config and hook status |
+| `/spawn-guard set <key> <value>` | Change a default (e.g., `set model sonnet`) |
+| `/spawn-guard override <key> <value>` | Set a per-chat override for this session |
+| `/spawn-guard clear-override` | Remove all per-chat overrides |
+| `/spawn-guard disable` | Temporarily disable enforcement |
+| `/spawn-guard enable` | Re-enable enforcement |
+| `/spawn-guard uninstall` | Remove hook, config, and CLAUDE.md snippet |
+
+---
+
+## First-Time Setup
+
+Run this flow when no config exists at `~/.claude/spawn-guard.json`, or when the user explicitly says `setup`.
+
+### Step 1: Ask for defaults
+
+Use `AskUserQuestion` with these questions (all in one call):
+
+**Question 1 - Default model:**
+- Header: "Model"
+- Question: "What model should subagents use by default?"
+- Options: Opus, Sonnet, Haiku, Fable
+- multiSelect: false
+
+**Question 2 - Default effort:**
+- Header: "Effort"
+- Question: "What reasoning effort should subagents use by default?"
+- Options: low, medium, high, max
+- multiSelect: false
+
+**Question 3 - Output style:**
+- Header: "Output"
+- Question: "How verbose should subagent output be?"
+- Options:
+  - concise (short, results-first responses)
+  - normal (standard detail level)
+  - verbose (thorough, detailed responses)
+- multiSelect: false
+
+**Question 4 - Enforcement mode:**
+- Header: "Enforcement"
+- Question: "What should happen when a subagent is spawned with wrong settings?"
+- Options:
+  - auto-correct (block and let Claude retry with correct settings)
+  - warn (allow but show a warning)
+  - block (block and require manual fix)
+- multiSelect: false
+
+### Step 2: Write config
+
+Write the config to `~/.claude/spawn-guard.json`:
+
+```json
+{
+  "version": "1.0.0",
+  "enabled": true,
+  "defaults": {
+    "model": "<user-choice>",
+    "effort": "<user-choice>",
+    "output": "<user-choice>"
+  },
+  "enforcement": "<user-choice>"
+}
+```
+
+### Step 3: Install the hook
+
+Determine the platform and install the appropriate hook:
+
+**On Windows (win32):**
+1. Copy the hook script from the skill's installed directory to `~/.claude/hooks/spawn-guard.ps1`
+   - The installed skill directory is where THIS SKILL.md file lives (check its path)
+   - The hook source is at `hooks/spawn-guard.ps1` relative to the skill root
+   - If the source hook file is NOT found at the relative path, check `~/.claude/skills/*/hooks/spawn-guard.ps1` via glob
+   - If STILL not found, generate the hook inline using the **Hook Script: PowerShell** section below
+2. Add the hook to `~/.claude/settings.json` under `hooks.PreToolUse`:
+
+```json
+{
+  "matcher": "Agent|Workflow",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"<HOME>\\.claude\\hooks\\spawn-guard.ps1\"",
+      "timeout": 5
+    }
+  ]
+}
+```
+
+Replace `<HOME>` with the actual home directory path. Append to the existing `PreToolUse` array if one exists; do not overwrite other hooks.
+
+**On macOS/Linux (darwin/linux):**
+1. Copy `hooks/spawn-guard.sh` to `~/.claude/hooks/spawn-guard.sh`
+   - Same fallback logic as Windows if source not found
+   - Run `chmod +x ~/.claude/hooks/spawn-guard.sh`
+2. Add to `~/.claude/settings.json`:
+
+```json
+{
+  "matcher": "Agent|Workflow",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "bash ~/.claude/hooks/spawn-guard.sh",
+      "timeout": 5
+    }
+  ]
+}
+```
+
+### Step 4: Add CLAUDE.md snippet
+
+Append the following to the user's global CLAUDE.md (`~/.claude/CLAUDE.md`). Place it after existing content. Use the exact delimiters shown:
+
+```
+<!-- SPAWN-GUARD:START -->
+## Spawn Guard (auto-enforced)
+Before spawning any subagent (Agent tool or Workflow agent()):
+1. Read `~/.claude/spawn-guard.json` for defaults (model, effort, output)
+2. Check `~/.claude/spawn-guard-session.json` for per-chat overrides (takes precedence over defaults)
+3. Apply the resolved model and effort to the Agent tool's `model` parameter or Workflow `agent()` opts
+4. For output style: if set to "concise", append "Keep your response concise and focused." to the subagent prompt; if "verbose", append "Be thorough and detailed in your response."
+5. If the user explicitly specifies different settings for a specific spawn, honor that one-time override
+When the user says "use [model] for this chat", "set effort to [level]", or similar per-chat directives:
+- Write the override to `~/.claude/spawn-guard-session.json` as `{"model":"...","effort":"...","output":"...","timestamp":"<ISO-8601>"}`
+- Only include the fields being overridden; omitted fields fall back to defaults
+<!-- SPAWN-GUARD:END -->
+```
+
+### Step 5: Confirm
+
+Tell the user setup is complete. Show:
+- The configured defaults
+- Hook installation status
+- How to change settings (`/spawn-guard set model sonnet`)
+- How to set per-chat overrides (`/spawn-guard override model sonnet` or just say "use sonnet for this chat")
+
+---
+
+## Show Status
+
+Read `~/.claude/spawn-guard.json` and display:
+- Enabled/disabled state
+- Default model, effort, output
+- Enforcement mode
+- Whether a session override is active (check `~/.claude/spawn-guard-session.json`)
+- Hook installation status (check if the hook entry exists in `~/.claude/settings.json`)
+
+---
+
+## Change a Setting
+
+For `/spawn-guard set <key> <value>`:
+
+Valid keys and values:
+- `model`: opus, sonnet, haiku, fable
+- `effort`: low, medium, high, xhigh, max
+- `output`: concise, normal, verbose
+- `enforcement`: auto-correct, warn, block
+
+Read the config, update the specified field, write it back. Confirm the change.
+
+---
+
+## Per-Chat Override
+
+For `/spawn-guard override <key> <value>`:
+
+Write or update `~/.claude/spawn-guard-session.json` with the override and a timestamp.
+
+When the user says things like "use sonnet for this chat" or "low effort for subagents today" outside of the slash command, the CLAUDE.md snippet instructs Claude to write the session override automatically.
+
+---
+
+## Disable / Enable
+
+Set `"enabled": false` or `true` in `~/.claude/spawn-guard.json`. When disabled, the hook allows all spawns without checking.
+
+---
+
+## Uninstall
+
+1. Remove the hook entry from `~/.claude/settings.json` (the one matching `spawn-guard`)
+2. Delete `~/.claude/hooks/spawn-guard.ps1` (or `.sh`)
+3. Delete `~/.claude/spawn-guard.json`
+4. Delete `~/.claude/spawn-guard-session.json` if it exists
+5. Remove the `<!-- SPAWN-GUARD:START -->` ... `<!-- SPAWN-GUARD:END -->` block from `~/.claude/CLAUDE.md`
+
+---
+
+## Hook Script: PowerShell
+
+If the hook file cannot be found in the skill's installed directory, generate it inline with this content:
+
+```powershell
+# spawn-guard PreToolUse hook (Windows)
+# Enforces model/effort defaults on Agent and Workflow tool calls
+
+$ErrorActionPreference = 'SilentlyContinue'
+
+try {
+    $json = [Console]::In.ReadToEnd()
+    $hookData = $json | ConvertFrom-Json
+} catch {
+    exit 0
+}
+
+$toolName = $hookData.tool_name
+if ($toolName -ne 'Agent' -and $toolName -ne 'Workflow') { exit 0 }
+
+$configPath = Join-Path $env:USERPROFILE '.claude\spawn-guard.json'
+if (-not (Test-Path $configPath)) { exit 0 }
+
+try {
+    $config = Get-Content $configPath -Raw | ConvertFrom-Json
+} catch { exit 0 }
+
+if ($config.enabled -eq $false) { exit 0 }
+
+$defaults = $config.defaults
+if (-not $defaults) { exit 0 }
+
+function Normalize-Model {
+    param([string]$Name)
+    if (-not $Name) { return $Name }
+    $n = $Name.ToLower().Trim()
+    if ($n -match 'opus')   { return 'opus' }
+    if ($n -match 'sonnet') { return 'sonnet' }
+    if ($n -match 'haiku')  { return 'haiku' }
+    if ($n -match 'fable')  { return 'fable' }
+    return $n
+}
+
+$effectiveModel = Normalize-Model $defaults.model
+$effectiveEffort = if ($defaults.effort) { $defaults.effort.ToLower().Trim() } else { $null }
+$enforcement = if ($config.enforcement) { $config.enforcement } else { 'auto-correct' }
+
+$overridePath = Join-Path $env:USERPROFILE '.claude\spawn-guard-session.json'
+if (Test-Path $overridePath) {
+    try {
+        $override = Get-Content $overridePath -Raw | ConvertFrom-Json
+        $ts = [datetime]::Parse($override.timestamp)
+        if (([datetime]::UtcNow - $ts).TotalHours -lt 24) {
+            if ($override.model) { $effectiveModel = Normalize-Model $override.model }
+            if ($override.effort) { $effectiveEffort = $override.effort.ToLower().Trim() }
+        }
+    } catch {}
+}
+
+function Write-Decision {
+    param([string]$Decision, [string]$Reason)
+    $escapedReason = $Reason -replace '"', '\"' -replace '\\', '\\\\'
+    Write-Output "{`"decision`":`"$Decision`",`"reason`":`"$escapedReason`"}"
+}
+
+function Decide {
+    param([string]$Reason)
+    if ($enforcement -eq 'warn') {
+        Write-Decision -Decision 'approve' -Reason $Reason
+    } else {
+        Write-Decision -Decision 'block' -Reason $Reason
+    }
+}
+
+if ($toolName -eq 'Agent') {
+    $toolInput = $hookData.tool_input
+    $requestedModel = Normalize-Model $toolInput.model
+
+    if ($requestedModel -and $effectiveModel -and $requestedModel -ne $effectiveModel) {
+        Decide "Spawn Guard: model mismatch. Requested '$requestedModel', configured default is '$effectiveModel'. Re-spawn with model='$effectiveModel'."
+        exit 0
+    }
+}
+
+if ($toolName -eq 'Workflow') {
+    $script = $hookData.tool_input.script
+    if (-not $script) { exit 0 }
+
+    if ($effectiveModel) {
+        $modelPattern = "model:\s*['""](\w+)['""]"
+        $modelMatches = [regex]::Matches($script, $modelPattern)
+        foreach ($m in $modelMatches) {
+            $found = Normalize-Model $m.Groups[1].Value
+            if ($found -ne $effectiveModel) {
+                Decide "Spawn Guard: workflow script uses model '$found', configured default is '$effectiveModel'. Update to model: '$effectiveModel'."
+                exit 0
+            }
+        }
+    }
+
+    if ($effectiveEffort) {
+        $effortPattern = "effort:\s*['""](\w+)['""]"
+        $effortMatches = [regex]::Matches($script, $effortPattern)
+        foreach ($m in $effortMatches) {
+            $found = $m.Groups[1].Value
+            if ($found -ne $effectiveEffort) {
+                Decide "Spawn Guard: workflow script uses effort '$found', configured default is '$effectiveEffort'. Update to effort: '$effectiveEffort'."
+                exit 0
+            }
+        }
+    }
+}
+
+exit 0
+```
+
+## Hook Script: Bash
+
+```bash
+#!/usr/bin/env bash
+# spawn-guard PreToolUse hook (macOS/Linux)
+# Enforces model/effort defaults on Agent and Workflow tool calls
+# Requires: jq
+
+set -euo pipefail
+
+INPUT=$(cat)
+
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+[[ "$TOOL_NAME" != "Agent" && "$TOOL_NAME" != "Workflow" ]] && exit 0
+
+CONFIG_PATH="$HOME/.claude/spawn-guard.json"
+[[ ! -f "$CONFIG_PATH" ]] && exit 0
+
+ENABLED=$(jq -r '.enabled // true' "$CONFIG_PATH")
+[[ "$ENABLED" == "false" ]] && exit 0
+
+normalize_model() {
+    local m="${1,,}"
+    case "$m" in
+        *opus*)   echo "opus" ;;
+        *sonnet*) echo "sonnet" ;;
+        *haiku*)  echo "haiku" ;;
+        *fable*)  echo "fable" ;;
+        *)        echo "$m" ;;
+    esac
+}
+
+DEFAULTS_MODEL=$(jq -r '.defaults.model // empty' "$CONFIG_PATH")
+DEFAULTS_EFFORT=$(jq -r '.defaults.effort // empty' "$CONFIG_PATH" | tr '[:upper:]' '[:lower:]')
+ENFORCEMENT=$(jq -r '.enforcement // "auto-correct"' "$CONFIG_PATH")
+
+EFFECTIVE_MODEL=$(normalize_model "$DEFAULTS_MODEL")
+EFFECTIVE_EFFORT="$DEFAULTS_EFFORT"
+
+OVERRIDE_PATH="$HOME/.claude/spawn-guard-session.json"
+if [[ -f "$OVERRIDE_PATH" ]]; then
+    OVERRIDE_TS=$(jq -r '.timestamp // empty' "$OVERRIDE_PATH")
+    if [[ -n "$OVERRIDE_TS" ]]; then
+        if OVERRIDE_EPOCH=$(date -d "$OVERRIDE_TS" +%s 2>/dev/null); then
+            :
+        elif OVERRIDE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${OVERRIDE_TS%%.*}" +%s 2>/dev/null); then
+            :
+        else
+            OVERRIDE_EPOCH=0
+        fi
+        NOW_EPOCH=$(date +%s)
+        DIFF=$(( NOW_EPOCH - OVERRIDE_EPOCH ))
+        if (( DIFF < 86400 )); then
+            OV_MODEL=$(jq -r '.model // empty' "$OVERRIDE_PATH")
+            OV_EFFORT=$(jq -r '.effort // empty' "$OVERRIDE_PATH")
+            [[ -n "$OV_MODEL" ]] && EFFECTIVE_MODEL=$(normalize_model "$OV_MODEL")
+            [[ -n "$OV_EFFORT" ]] && EFFECTIVE_EFFORT="${OV_EFFORT,,}"
+        fi
+    fi
+fi
+
+decide() {
+    local reason="$1"
+    reason=$(echo "$reason" | sed 's/"/\\"/g')
+    if [[ "$ENFORCEMENT" == "warn" ]]; then
+        printf '{"decision":"approve","reason":"%s"}\n' "$reason"
+    else
+        printf '{"decision":"block","reason":"%s"}\n' "$reason"
+    fi
+}
+
+if [[ "$TOOL_NAME" == "Agent" ]]; then
+    REQUESTED_MODEL=$(normalize_model "$(echo "$INPUT" | jq -r '.tool_input.model // empty')")
+    if [[ -n "$REQUESTED_MODEL" && -n "$EFFECTIVE_MODEL" && "$REQUESTED_MODEL" != "$EFFECTIVE_MODEL" ]]; then
+        decide "Spawn Guard: model mismatch. Requested '$REQUESTED_MODEL', configured default is '$EFFECTIVE_MODEL'. Re-spawn with model='$EFFECTIVE_MODEL'."
+        exit 0
+    fi
+fi
+
+if [[ "$TOOL_NAME" == "Workflow" ]]; then
+    SCRIPT=$(echo "$INPUT" | jq -r '.tool_input.script // empty')
+    if [[ -n "$SCRIPT" && -n "$EFFECTIVE_MODEL" ]]; then
+        FOUND_MODELS=$(echo "$SCRIPT" | grep -oP "model:\s*['\"](\K\w+)" || true)
+        for RAW_MODEL in $FOUND_MODELS; do
+            MODEL=$(normalize_model "$RAW_MODEL")
+            if [[ "$MODEL" != "$EFFECTIVE_MODEL" ]]; then
+                decide "Spawn Guard: workflow uses model '$MODEL', configured default is '$EFFECTIVE_MODEL'. Update to model: '$EFFECTIVE_MODEL'."
+                exit 0
+            fi
+        done
+    fi
+    if [[ -n "$SCRIPT" && -n "$EFFECTIVE_EFFORT" ]]; then
+        FOUND_EFFORTS=$(echo "$SCRIPT" | grep -oP "effort:\s*['\"](\K\w+)" || true)
+        for EFFORT in $FOUND_EFFORTS; do
+            if [[ "$EFFORT" != "$EFFECTIVE_EFFORT" ]]; then
+                decide "Spawn Guard: workflow uses effort '$EFFORT', configured default is '$EFFECTIVE_EFFORT'. Update to effort: '$EFFECTIVE_EFFORT'."
+                exit 0
+            fi
+        done
+    fi
+fi
+
+exit 0
+```
+
+---
+
+## Enforcement Behavior Reference
+
+| Layer | What it enforces | How |
+|---|---|---|
+| CLAUDE.md snippet | Model, effort, output style | Claude applies defaults proactively before spawning |
+| PreToolUse hook | Model (Agent), model + effort (Workflow) | Hard gate: blocks/warns on mismatch |
+| Prompt injection | Output style (concise/verbose) | Appended to subagent prompt text |
+
+**What each enforcement mode does:**
+- **auto-correct**: Hook blocks the wrong spawn. Claude sees the block reason and re-spawns with correct settings. From the user's perspective, it looks like a brief retry.
+- **warn**: Hook approves but shows a warning. The spawn proceeds with wrong settings but the mismatch is visible.
+- **block**: Hook blocks and does NOT auto-retry. Claude must ask the user what to do.
+
+**Limitations (tell the user during setup):**
+- The Agent tool has no `effort` parameter. Effort is only enforceable on Workflow `agent()` calls. For Agent spawns, effort is inherited from the session's global effort level.
+- Output style is enforced via prompt text, not a parameter. It's soft enforcement.
+- The Workflow script check is regex-based (not a full JS parser). It catches `model: 'xxx'` and `effort: 'xxx'` patterns but could miss computed values.
