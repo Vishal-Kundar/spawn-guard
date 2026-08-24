@@ -39,6 +39,7 @@ Use `AskUserQuestion` with these questions (all in one call):
 - Question: "What model should subagents use by default?"
 - Options: Opus, Sonnet, Haiku, Fable
 - multiSelect: false
+- The user may select "Other" and type a custom model string (e.g., `claude-opus-4-6[1m]`, `claude-sonnet-5`, or any future model ID). Store the exact string they provide. The hook normalizer handles known families automatically (anything containing "opus" resolves to `opus` for comparison), but truly novel model IDs are compared as literal strings.
 
 **Question 2 - Default effort:**
 - Header: "Effort"
@@ -172,7 +173,7 @@ Read `~/.claude/spawn-guard.json` and display:
 For `/spawn-guard set <key> <value>`:
 
 Valid keys and values:
-- `model`: opus, sonnet, haiku, fable
+- `model`: opus, sonnet, haiku, fable, or any custom model ID (e.g., `claude-opus-4-6[1m]`, `claude-sonnet-5`). Custom IDs are stored as-is; known families are normalized for comparison.
 - `effort`: low, medium, high, xhigh, max
 - `output`: concise, normal, verbose
 - `enforcement`: auto-correct, warn, block

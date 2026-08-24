@@ -60,12 +60,12 @@ Config lives at `~/.claude/spawn-guard.json`:
 
 | Setting | Values | Description |
 |---------|--------|-------------|
-| `model` | `opus` `sonnet` `haiku` `fable` | Default model for subagents |
+| `model` | `opus` `sonnet` `haiku` `fable` or custom ID | Default model for subagents |
 | `effort` | `low` `medium` `high` `xhigh` `max` | Default reasoning effort |
 | `output` | `concise` `normal` `verbose` | Output verbosity |
 | `enforcement` | `auto-correct` `warn` `block` | What happens on mismatch |
 
-Model names are normalized: `claude-opus-4-6`, `Opus`, and `opus` all resolve to `opus`. No false blocks from format mismatches.
+Model names are normalized: `claude-opus-4-6`, `claude-opus-4-6[1m]`, `Opus`, and `opus` all resolve to `opus`. No false blocks from format mismatches. You can also set a custom model ID for new or non-standard models -- these are compared as literal strings.
 
 ## Commands
 
